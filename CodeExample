@@ -1,426 +1,234 @@
+--[[
+Troop AI System (Refactored & Documented)
+Handles merging, combat, movement, and capturing mechanics for troops.
+--]]
+
 local Players = game:GetService("Players")
-local PathFindingService = game:GetService("PathfindingService")
 
-local function MergeTroopsTogether(Soldier, Player, CityNameValue)
-	local Humanoid = Soldier:FindFirstChild("Humanoid")
-	for _, otherSoldier in pairs(game.Workspace.Troops:GetChildren()) do
-		if otherSoldier.Name ~= Soldier.Name then
-			if otherSoldier:FindFirstChild("Owner") and otherSoldier:FindFirstChild("Owner").Value == Player.Name then
-				if otherSoldier:FindFirstChild("City Name") and otherSoldier:FindFirstChild("City Name").Value == CityNameValue.Value then
-					if otherSoldier:FindFirstChild("DefendCommander") and otherSoldier.DefendCommander.Value == true then
-						local otherHumanoid = otherSoldier:FindFirstChild("Humanoid")
-						local otherDamage = otherSoldier:FindFirstChild("Damage")
-						local CurrentDamage = Soldier:FindFirstChild("Damage")
-						if Soldier and Soldier.PrimaryPart then
-							local distanceToCommander = (Soldier.PrimaryPart.Position - otherSoldier.PrimaryPart.Position).Magnitude
-							local NumberOfSoldiers = otherSoldier:FindFirstChild("NumberOfSoldiers")
+-- CONSTANTS
+local TROOPS_FOLDER = workspace:WaitForChild("Troops")
+local WORLD_MAP = workspace:WaitForChild("World Map")
 
-							-- If the non-commander soldier is near the commander
-							if distanceToCommander <= 3 then
-								-- Transfer health to commander
-								if otherHumanoid and Humanoid then
-									otherHumanoid.MaxHealth = otherHumanoid.MaxHealth + Humanoid.Health
-									otherHumanoid.Health = otherHumanoid.Health + Humanoid.Health
-								end
+-- Utility Functions
+local function isValidSoldier(soldier)
+	return soldier and soldier:FindFirstChild("Owner") and soldier.Owner.Value ~= ""
+end
 
-								if otherDamage and CurrentDamage then
-									otherDamage.Value += CurrentDamage.Value
-								end
+local function getPlayerFromSoldier(soldier)
+	return Players:FindFirstChild(soldier.Owner.Value)
+end
 
-								if NumberOfSoldiers then
-									NumberOfSoldiers.Value += 1
-								end
-								-- Remove the non-commander soldier
-								Soldier:Destroy()
-								break
-							end
-						end
-					elseif otherSoldier:FindFirstChild("AttackCommander") and otherSoldier.AttackCommander.Value == true then
-						local otherHumanoid = otherSoldier:FindFirstChild("Humanoid")
-						local otherDamage = otherSoldier:FindFirstChild("Damage")
-						local CurrentDamage = Soldier:FindFirstChild("Damage")
-						if Soldier and Soldier.PrimaryPart then
-							local distanceToCommander = (Soldier.PrimaryPart.Position - otherSoldier.PrimaryPart.Position).Magnitude
-							local NumberOfSoldiers = otherSoldier:FindFirstChild("NumberOfSoldiers")
+local function isCommanderOfType(soldier, commanderType)
+	local commanderFlag = soldier:FindFirstChild(commanderType)
+	return commanderFlag and commanderFlag.Value == true
+end
 
-							-- If the non-commander soldier is near the commander
-							if distanceToCommander <= 3 then
-								-- Transfer health to commander
-								if otherHumanoid and Humanoid then
-									otherHumanoid.MaxHealth = otherHumanoid.MaxHealth + Humanoid.Health
-									otherHumanoid.Health = otherHumanoid.Health + Humanoid.Health
-								end
+local function transferStats(fromSoldier, toSoldier)
+	local fromHumanoid = fromSoldier:FindFirstChild("Humanoid")
+	local toHumanoid = toSoldier:FindFirstChild("Humanoid")
+	local fromDamage = fromSoldier:FindFirstChild("Damage")
+	local toDamage = toSoldier:FindFirstChild("Damage")
+	local toCount = toSoldier:FindFirstChild("NumberOfSoldiers")
 
-								if otherDamage and CurrentDamage then
-									otherDamage.Value += CurrentDamage.Value
-								end
+	if fromHumanoid and toHumanoid then
+		toHumanoid.MaxHealth += fromHumanoid.Health
+		toHumanoid.Health += fromHumanoid.Health
+	end
 
-								if NumberOfSoldiers then
-									NumberOfSoldiers.Value += 1
-								end
-								-- Remove the non-commander soldier
-								Soldier:Destroy()
-								break
-							end
-						end
-					end
+	if fromDamage and toDamage then
+		toDamage.Value += fromDamage.Value
+	end
+
+	if toCount then
+		toCount.Value += 1
+	end
+
+	fromSoldier:Destroy()
+end
+
+local function tryMergeSoldier(soldier, player, cityNameValue)
+	local humanoid = soldier:FindFirstChild("Humanoid")
+	if not humanoid or not soldier.PrimaryPart then return end
+
+	for _, other in ipairs(TROOPS_FOLDER:GetChildren()) do
+		if other.Name ~= soldier.Name and other:FindFirstChild("Owner") and other.Owner.Value == player.Name and
+		   other:FindFirstChild("City Name") and other["City Name"].Value == cityNameValue.Value then
+
+			local mergeType = isCommanderOfType(other, "DefendCommander") and "DefendCommander"
+				or isCommanderOfType(other, "AttackCommander") and "AttackCommander" or nil
+
+			if mergeType and other.PrimaryPart then
+				local distance = (soldier.PrimaryPart.Position - other.PrimaryPart.Position).Magnitude
+				if distance <= 3 then
+					transferStats(soldier, other)
+					break
 				end
 			end
 		end
 	end
 end
 
+local function getClosestEnemy(soldier, player, range)
+	local closest, minDist = nil, range
+	for _, enemy in ipairs(TROOPS_FOLDER:GetChildren()) do
+		if enemy.Name ~= soldier.Name and enemy:FindFirstChild("Owner") and enemy.Owner.Value ~= player.Name then
+			local eh = enemy:FindFirstChild("Humanoid")
+			if eh and eh.Health > 0 and enemy.PrimaryPart then
+				local dist = (soldier.PrimaryPart.Position - enemy.PrimaryPart.Position).Magnitude
+				if dist < minDist then
+					closest, minDist = enemy, dist
+				end
+			end
+		end
+	end
+	return closest
+end
+
+local function setupDeathCleanup(soldier)
+	local humanoid = soldier:FindFirstChild("Humanoid")
+	if humanoid then
+		humanoid.Died:Connect(function()
+			soldier:Destroy()
+		end)
+	end
+end
+
+local function moveToWithRaycast(soldier, destination)
+	local humanoid = soldier:FindFirstChild("Humanoid")
+	if not humanoid or not soldier.PrimaryPart then return end
+
+	local origin = soldier.PrimaryPart.Position + Vector3.new(0, -0.2, 0)
+	local direction = (destination - origin).Unit
+
+	local rayParams = RaycastParams.new()
+	rayParams.IgnoreWater = true
+
+	local ignoreList = { soldier }
+	for _, d in ipairs(TROOPS_FOLDER:GetDescendants()) do
+		table.insert(ignoreList, d)
+	end
+
+	rayParams.FilterDescendantsInstances = ignoreList
+	local result = workspace:Raycast(origin, direction, rayParams)
+
+	if result and result.Instance and result.Instance:IsA("BasePart") then
+		local obstacle = result.Instance
+		if obstacle.Size.Y > soldier.PrimaryPart.Size.Y then
+			humanoid.Jump = true
+		end
+	end
+
+	humanoid.WalkSpeed = 1
+	humanoid:MoveTo(destination)
+end
+
+local function updateSoldierNameUI(soldier)
+	local head = soldier:FindFirstChild("Head")
+	local ui = head and head:FindFirstChild("NameUI")
+	local count = soldier:FindFirstChild("NumberOfSoldiers")
+	if ui and count then
+		ui.Enabled = true
+		ui.TextLabel.Text = "Soldiers: " .. count.Value
+	end
+end
+
+local function returnToBaseOrCity(soldier, player, objectTarget)
+	local target = WORLD_MAP:FindFirstChild(objectTarget.Value)
+	if not target or not soldier.PrimaryPart then return end
+
+	local dest = (target:FindFirstChild("Military") and target.Military.Position)
+				or (target:FindFirstChild("City") and target.City.Position)
+	if not dest then return end
+
+	if (soldier.PrimaryPart.Position - dest).Magnitude > 2 then
+		moveToWithRaycast(soldier, dest)
+	else
+		soldier.Humanoid:MoveTo(soldier.PrimaryPart.Position)
+		soldier.Humanoid.WalkSpeed = 0
+		print("Returned Home:", target.Name)
+	end
+end
+
+local function captureTarget(soldier, player, target)
+	if not target then return end
+
+	local color = player.Power.SelectedColor.Value
+	target.BrickColor = BrickColor.new(color)
+
+	-- Update previous owner's stats
+	local ownerVal = target:FindFirstChild("Owner")
+	if ownerVal and ownerVal:IsA("StringValue") then
+		local oldPlayer = Players:FindFirstChild(ownerVal.Value)
+		if oldPlayer then
+			for _, name in ipairs({"Fortress", "Military", "Factory"}) do
+				if target:FindFirstChild(name) then
+					local stat = oldPlayer.Power:FindFirstChild(name)
+					if stat then stat.Value -= 1 end
+				end
+			end
+		end
+		ownerVal.Value = player.Name
+	end
+
+	-- Update new owner's stats
+	for _, name in ipairs({"Fortress", "Military", "Factory"}) do
+		if target:FindFirstChild(name) then
+			player.Power[name].Value += 1
+		end
+	end
+
+	print("Captured target:", target.Name)
+	soldier:Destroy()
+end
+
+-- MAIN LOOP
 while true do
-	for i, soldier in pairs(game.Workspace.Troops:GetChildren()) do
-		if soldier then
-			if soldier:FindFirstChild("Owner") and soldier.Owner.Value ~= "" then
-				local Player = Players:FindFirstChild(soldier.Owner.Value)
-				if soldier.Owner.Value == Player.Name then
-					local CityName = soldier:FindFirstChild("City Name")
-					local AttackCommander = soldier:FindFirstChild("AttackCommander")
-					local DefendCommander = soldier:FindFirstChild("DefendCommander")
-					local ObjectTarget = soldier:FindFirstChild("ObjectTarget")
-					local Status = soldier:FindFirstChild("Status")
-					local Damage = soldier:FindFirstChild("Damage")
-					local NumberOfSoldiers = soldier:FindFirstChild("NumberOfSoldiers")
+	for _, soldier in ipairs(TROOPS_FOLDER:GetChildren()) do
+		if isValidSoldier(soldier) then
+			local player = getPlayerFromSoldier(soldier)
+			if not player then continue end
 
-					local Humanoid = soldier:FindFirstChild("Humanoid")
-					local connection
-					connection = Humanoid.Died:Connect(function()
-						soldier:Destroy()
-						connection:Disconnect() -- Clean up the connection
-						print("DISSCONNECTED")
-					end)
+			setupDeathCleanup(soldier)
+			updateSoldierNameUI(soldier)
 
-					local Head = soldier:FindFirstChild("Head")
-					local NameUI = Head:FindFirstChild("NameUI")
+			local cityName = soldier:FindFirstChild("City Name")
+			tryMergeSoldier(soldier, player, cityName)
 
-					MergeTroopsTogether(soldier, Player, CityName)
-					
-					if AttackCommander and AttackCommander.Value == true then
-						NameUI.Enabled = true
-						NameUI.TextLabel.Text = "Soldiers: "..NumberOfSoldiers.Value
-					elseif DefendCommander and DefendCommander.Value == true then
-						NameUI.Enabled = true
-						NameUI.TextLabel.Text = "Soldiers: "..NumberOfSoldiers.Value
+			local status = soldier:FindFirstChild("Status")
+			local objectTarget = soldier:FindFirstChild("ObjectTarget")
+			local damage = soldier:FindFirstChild("Damage")
+			local humanoid = soldier:FindFirstChild("Humanoid")
+
+			if not status or not objectTarget or not damage or not humanoid then continue end
+
+			if status.Value == "Defend" or status.Value == "Attack" then
+				local enemy = getClosestEnemy(soldier, player, status.Value == "Defend" and 8 or 15)
+				if enemy then
+					local dist = (soldier.PrimaryPart.Position - enemy.PrimaryPart.Position).Magnitude
+					if dist <= 2 then
+						humanoid:MoveTo(soldier.PrimaryPart.Position)
+						humanoid.WalkSpeed = 0
+						local eh = enemy:FindFirstChild("Humanoid")
+						if eh then
+							eh:TakeDamage(damage.Value)
+							task.wait(1)
+						end
+					else
+						moveToWithRaycast(soldier, enemy.PrimaryPart.Position)
 					end
-					
-					if Status.Value == "Defend" then
-						local closestEnemyAI = nil
-						local closestDistance = 8
-
-						for _, EnemyAI in pairs(game.Workspace.Troops:GetChildren()) do
-							if EnemyAI.Name ~= soldier.Name and soldier and soldier.PrimaryPart then
-								if EnemyAI:FindFirstChild("Owner") and EnemyAI.Owner.Value ~= Player.Name then
-									local EnemyHumanoid = EnemyAI:FindFirstChild("Humanoid")
-									if EnemyHumanoid and EnemyHumanoid.Health > 0 then
-										local distance = (soldier.PrimaryPart.Position - EnemyAI.PrimaryPart.Position).Magnitude
-										if distance < closestDistance then
-											closestDistance = distance
-											closestEnemyAI = EnemyAI
-										end
-									end
-								end
-							end
-						end
-
-						if closestEnemyAI then
-							local EnemyHumanoid = closestEnemyAI:FindFirstChild("Humanoid")
-							local distanceToEnemyAI = (soldier.PrimaryPart.Position - closestEnemyAI.PrimaryPart.Position).Magnitude
-							if distanceToEnemyAI <= 2 then
-								-- Close enough to attack NPC
-								Humanoid:MoveTo(soldier.PrimaryPart.Position) -- Stop soldier's movement
-								Humanoid.WalkSpeed = 0
-
-								-- Attack EnemyAI
-								if EnemyHumanoid and EnemyHumanoid.Health > 0 then
-									EnemyHumanoid:TakeDamage(Damage.Value)
-									task.wait(1) -- Attack CoolDown
-								end
-							else
-								-- Move toward Enemy
-								if Humanoid.WalkSpeed > 0 then -- Only run raycast if soldier is moving
-									local rayOrigin = soldier.PrimaryPart.Position + Vector3.new(0, -0.2, 0)
-									local direction = (closestEnemyAI.PrimaryPart.Position - rayOrigin).Unit * 1
-
-									local raycastParams = RaycastParams.new()
-									raycastParams.IgnoreWater = true
-
-									local ignoreList = {soldier}
-									local troopsFolder = workspace:FindFirstChild("Troops")
-
-									if troopsFolder then
-										for _, descendant in ipairs(troopsFolder:GetDescendants()) do
-											table.insert(ignoreList, descendant)
-										end
-									end
-
-									raycastParams.FilterDescendantsInstances = ignoreList
-
-									local result = workspace:Raycast(rayOrigin, direction, raycastParams)
-
-									if result then
-										local hitPart = result.Instance
-										if hitPart and (hitPart:IsA("BasePart") or hitPart:IsA("UnionOperation")) then
-											print("Ray hit:", hitPart:GetFullName())
-
-											local obstacleHeight = hitPart.Size.Y
-											local soldierHeight = soldier.PrimaryPart.Size.Y
-
-											if obstacleHeight > soldierHeight then
-												Humanoid.Jump = true
-											end
-										end
-									else
-										print("Ray hit nothing.")
-									end
-								end
-
-								Humanoid.WalkSpeed = 1
-								Humanoid:MoveTo(closestEnemyAI.PrimaryPart.Position)
-							end
+				else
+					if status.Value == "Defend" then
+						returnToBaseOrCity(soldier, player, objectTarget)
+					else
+						local target = WORLD_MAP:FindFirstChild(objectTarget.Value)
+						local dest = (target:FindFirstChild("City") and target.City.Position) or target.Position
+						if (soldier.PrimaryPart.Position - dest).Magnitude > 2 then
+							moveToWithRaycast(soldier, dest)
 						else
-							--No enemies, move back to Military Base Or City
-
-							local Target = game.Workspace["World Map"]:FindFirstChild(ObjectTarget.Value)
-							local destination = Target:FindFirstChild("Military") and Target.Military.Position or Target:FindFirstChild("City") and Target.City.Position
-							if soldier and soldier.PrimaryPart then
-								local distanceToDestination = (soldier.PrimaryPart.Position - destination).Magnitude
-
-								if distanceToDestination > 2 then
-									if Humanoid.WalkSpeed > 0  then -- Only run raycast if soldier is moving
-										local rayOrigin = soldier.PrimaryPart.Position + Vector3.new(0, -0.2, 0)
-										local direction = (destination - rayOrigin).Unit * 1
-
-										local raycastParams = RaycastParams.new()
-										raycastParams.IgnoreWater = true
-
-										local ignoreList = {soldier}
-										local troopsFolder = workspace:FindFirstChild("Troops")
-
-										if troopsFolder then
-											for _, descendant in ipairs(troopsFolder:GetDescendants()) do
-												table.insert(ignoreList, descendant)
-											end
-										end
-
-										raycastParams.FilterDescendantsInstances = ignoreList
-
-										local result = workspace:Raycast(rayOrigin, direction, raycastParams)
-
-										if result then
-											local hitPart = result.Instance
-											if hitPart and (hitPart:IsA("BasePart") or hitPart:IsA("UnionOperation")) then
-												print("Ray hit:", hitPart:GetFullName())
-
-												local obstacleHeight = hitPart.Size.Y
-												local soldierHeight = soldier.PrimaryPart.Size.Y
-
-												if obstacleHeight > soldierHeight then
-													Humanoid.Jump = true
-												end
-											end
-										else
-											print("Ray hit nothing.")
-										end
-									end
-									-- Move back to the Military Base or City
-									Humanoid.WalkSpeed = 1
-									Humanoid:MoveTo(destination)
-								else
-									-- Soldier reached military base or city, continue defending
-									Humanoid:MoveTo(soldier.PrimaryPart.Position) -- Stop movement
-									Humanoid.WalkSpeed = 0
-									print("Returned Home:", Target.Name)
-								end
-							end
-
-						end
-					end					
-					
-					if Status.Value == "Attack" then
-						local closestEnemyAI = nil
-						local closestDistance = 15
-						
-
-						--Find nearby enemy NPCs
-						for _, npc in pairs(game.Workspace.Troops:GetChildren()) do
-							if npc.Name ~= soldier.Name and npc:FindFirstChild("Owner") and npc.Owner.Value ~= Player.Name then
-								local npcHumanoid = npc:FindFirstChild("Humanoid")
-								if npcHumanoid and npcHumanoid.Health > 0 then
-									if soldier and soldier.PrimaryPart and soldier.Parent == game.Workspace.Troops then
-										local distance = (soldier.PrimaryPart.Position - npc.PrimaryPart.Position).Magnitude
-										if distance < closestDistance then
-											closestDistance = distance
-											closestEnemyAI = npc
-										end
-									end
-								end
-							end
-						end
-						
-						
-						if closestEnemyAI then
-							local EnemyHumanoid = closestEnemyAI:FindFirstChild("Humanoid")
-							local distanceToEnemyAI = (soldier.PrimaryPart.Position - closestEnemyAI.PrimaryPart.Position).Magnitude
-							if distanceToEnemyAI <= 2 then
-								-- Close enough to attack NPC
-								Humanoid:MoveTo(soldier.PrimaryPart.Position) -- Stop soldier's movement
-								Humanoid.WalkSpeed = 0
-
-								-- Attack EnemyAI
-								if EnemyHumanoid and EnemyHumanoid.Health > 0 then
-									EnemyHumanoid:TakeDamage(Damage.Value)
-									task.wait(1) -- Attack CoolDown
-								end
-							else
-								-- Move toward Enemy
-								if Humanoid.WalkSpeed > 0 then -- Only run raycast if soldier is moving
-									local rayOrigin = soldier.PrimaryPart.Position + Vector3.new(0, -0.2, 0)
-									local direction = (closestEnemyAI.PrimaryPart.Position - rayOrigin).Unit * 1
-
-									local raycastParams = RaycastParams.new()
-									raycastParams.IgnoreWater = true
-
-									local ignoreList = {soldier}
-									local troopsFolder = workspace:FindFirstChild("Troops")
-
-									if troopsFolder then
-										for _, descendant in ipairs(troopsFolder:GetDescendants()) do
-											table.insert(ignoreList, descendant)
-										end
-									end
-
-									raycastParams.FilterDescendantsInstances = ignoreList
-
-									local result = workspace:Raycast(rayOrigin, direction, raycastParams)
-
-									if result then
-										local hitPart = result.Instance
-										if hitPart and (hitPart:IsA("BasePart") or hitPart:IsA("UnionOperation")) then
-											print("Ray hit:", hitPart:GetFullName())
-
-											local obstacleHeight = hitPart.Size.Y
-											local soldierHeight = soldier.PrimaryPart.Size.Y
-
-											if obstacleHeight > soldierHeight then
-												Humanoid.Jump = true
-											end
-										end
-									else
-										print("Ray hit nothing.")
-									end
-								end
-
-								Humanoid.WalkSpeed = 1
-								Humanoid:MoveTo(closestEnemyAI.PrimaryPart.Position)
-							end
-						else
-							
-							local Target = game.Workspace["World Map"]:FindFirstChild(ObjectTarget.Value)
-							local destination = Target:FindFirstChild("City") and Target.City.Position or Target.Position
-							
-							if soldier and soldier.PrimaryPart then
-								local distanceToDestination = (soldier.PrimaryPart.Position - destination).Magnitude
-								
-								if distanceToDestination > 2 then
-									if Humanoid.WalkSpeed > 0 then -- Only run raycast if soldier is moving
-										local rayOrigin = soldier.PrimaryPart.Position + Vector3.new(0, -0.2, 0)
-										local direction = (destination - rayOrigin).Unit * 1
-
-										local raycastParams = RaycastParams.new()
-										raycastParams.IgnoreWater = true
-
-										local ignoreList = {soldier}
-										local troopsFolder = workspace:FindFirstChild("Troops")
-
-										if troopsFolder then
-											for _, descendant in ipairs(troopsFolder:GetDescendants()) do
-												table.insert(ignoreList, descendant)
-											end
-										end
-
-										raycastParams.FilterDescendantsInstances = ignoreList
-
-										local result = workspace:Raycast(rayOrigin, direction, raycastParams)
-
-										if result then
-											local hitPart = result.Instance
-											if hitPart and (hitPart:IsA("BasePart") or hitPart:IsA("UnionOperation")) then
-												print("Ray hit:", hitPart:GetFullName())
-
-												local obstacleHeight = hitPart.Size.Y
-												local soldierHeight = soldier.PrimaryPart.Size.Y
-
-												if obstacleHeight > soldierHeight then
-													Humanoid.Jump = true
-												end
-											end
-										else
-											print("Ray hit nothing.")
-										end
-									end
-									
-									Humanoid.WalkSpeed = 1
-									Humanoid:MoveTo(destination)
-								else
-									---Capture
-									Humanoid:MoveTo(soldier.PrimaryPart.Position) -- Stop movement
-									Humanoid.WalkSpeed = 0
-
-									if Target:FindFirstChild("Fortress") then
-										task.wait(5)
-									else
-										task.wait(1)
-									end
-									-- Set new owner and color
-									local color = Player.Power.SelectedColor.Value
-									Target.BrickColor = BrickColor.new(color)
-
-									local ownerValue = Target:FindFirstChild("Owner")
-									if ownerValue and ownerValue:IsA("StringValue") then
-										local OldOwner = game.Players:FindFirstChild(ownerValue.Value)
-										if OldOwner then
-											local Power = OldOwner:FindFirstChild("Power")
-											local Fortress = Power:FindFirstChild("Fortress")
-											local Military = Power:FindFirstChild("Military")
-											local Factory = Power:FindFirstChild("Factory")
-											if Target:FindFirstChild("Fortress") then
-												Fortress.Value -= 1
-											end
-											if Target:FindFirstChild("Military") then
-												Military.Value -= 1
-											end
-											if Target:FindFirstChild("Factory") then
-												Factory.Value -= 1
-											end
-										end
-										ownerValue.Value = Player.Name
-									end
-
-									local Fortress = Target:FindFirstChild("Fortress")
-									local Military = Target:FindFirstChild("Military")
-									local Factory = Target:FindFirstChild("Factory") 
-									if Fortress then
-										Player.Power.Fortress.Value += 1
-									end
-
-									if Military then
-										Player.Power.Military.Value += 1
-									end
-
-									if Factory then
-										Player.Power.Factory.Value += 1
-									end
-
-									print("Captured target:", Target.Name)
-
-									soldier:Destroy()
-								end
-							end
+							if target:FindFirstChild("Fortress") then task.wait(5) else task.wait(1) end
+							captureTarget(soldier, player, target)
 						end
 					end
-					
 				end
 			end
 		end
